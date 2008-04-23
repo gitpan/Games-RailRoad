@@ -25,8 +25,8 @@ sub draw {
     my $frac = $self->frac;
 
     my $diag = 2;
-    my ($rowf, $colf) = split /,/, $from;
-    my ($rowt, $colt) = split /,/, $to;
+    my ($colf, $rowf) = split /,/, $from;
+    my ($colt, $rowt) = split /,/, $to;
     $canvas->delete("$self");
     my $x = ( $colf + ($colt-$colf) * $frac ) * $tilelen;
     my $y = ( $rowf + ($rowt-$rowf) * $frac ) * $tilelen;
@@ -60,9 +60,9 @@ C<Games::RailRoad::Train> provides a train object.
 
 =head1 CONSTRUCTOR
 
-=head2 my $rail = Games::RailRoad::Rail->new( \%opts );
+=head2 my $train = Games::RailRoad::Train->new( \%opts );
 
-Create a new rail object. One can pass a hash reference with the
+Create a new train object. One can pass a hash reference with the
 following keys:
 
 

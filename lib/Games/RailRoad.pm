@@ -12,18 +12,18 @@ use strict;
 use warnings;
 use 5.010;
 
+use Games::RailRoad::Node;
 use Games::RailRoad::Train;
-use Graph;
 use Readonly;
 use Tk; # should come before POE
 use Tk::ToolBar;
 use POE;
 
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
-Readonly my $NBROWS  => 40;
 Readonly my $NBCOLS  => 60;
+Readonly my $NBROWS  => 40;
 Readonly my $TILELEN => 20;    # in pixels
 Readonly my $TICK    => 0.050; # in seconds
 
@@ -50,12 +50,11 @@ sub spawn {
             _tick            => \&_on_tick,
             # gui events
             _b_quit          => \&_on_b_quit,
+            _c_b1_dblclick   => \&_on_c_b1_dblclick,
             _c_b1_motion     => \&_on_c_b1_motion,
             _c_b1_press      => \&_on_c_b1_press,
             _c_b2_press      => \&_on_c_b2_press,
-            _c_b3_motion     => \&_on_c_b3_motion,
             _c_b3_press      => \&_on_c_b3_press,
-            _c_b3_release    => \&_on_c_b3_release,
         },
         args => \%opts,
     );
@@ -175,16 +174,22 @@ sub _on_start {
         #-browsecmd  => $s->postback('_tm_click'),
     )->pack(-side=>'left', -fill=>'both', -expand=>1);
     $c->createGrid( 0, 0, $TILELEN, $TILELEN, -lines => 0 );
-    $c->CanvasBind( '<B1-Motion>',     [$s->postback('_c_b1_motion'), Ev('x'), Ev('y')] );
-    $c->CanvasBind( '<ButtonPress-1>', [$s->postback('_c_b1_press'),  Ev('x'), Ev('y')] );
-    $c->CanvasBind( '<ButtonPress-2>', [$s->postback('_c_b2_press'),  Ev('x'), Ev('y')] );
-    $c->CanvasBind( '<B3-Motion>',       [$s->postback('_c_b3_motion'),   Ev('x'), Ev('y')] );
-    $c->CanvasBind( '<ButtonPress-3>',   [$s->postback('_c_b3_press'),    Ev('x'), Ev('y')] );
-    $c->CanvasBind( '<ButtonRelease-3>', [$s->postback('_c_b3_release'),  Ev('x'), Ev('y')] );
     $h->{w}{canvas} = $c;
 
+    # binding canvas events.
+    my %event = (
+        '<B1-Motion>'            => '_c_b1_motion',
+        '<Double-ButtonPress-1>' => '_c_b1_dblclick',
+        '<ButtonPress-1>'        => '_c_b1_press',
+        '<ButtonPress-2>'        => '_c_b2_press',
+        '<ButtonPress-3>'        => '_c_b3_press',
+    );
+    $c->CanvasBind($_ , [$s->postback($event{$_}), Ev('x'), Ev('y')] )
+        foreach keys %event;
+
     # -- various heap initializations
-    $h->{graph} = Graph->new( undirected => 1 );
+    $h->{nodes} = {};
+    #$h->{graph} = Graph->new( undirected => 1 );
     $h->{train} = undef;
     #$k->yield( $opts->{file} ? ('_open_file', $opts->{file}) : '_b_open' );
 
@@ -208,9 +213,24 @@ sub _on_tick {
         my $from = $train->from;
         my $to   = $train->to;
 
-        my @neighbours = grep { $_ ne $from } $h->{graph}->neighbours($to);
+        my ($fcol, $frow) = split /,/, $from;
+        my ($tcol, $trow) = split /,/, $to;
+
+        my $dcol = $fcol-$tcol;
+        my $drow = $frow-$trow;
+        my $move = "$dcol,$drow";
+        my $dir  = _dir_coords($move);
+
+        my $next = $h->{nodes}{$to}->next_dir($dir);
+        return unless defined $next; # dead-end
+        $move = _dir_coords($next);
+        ($dcol, $drow) = split /,/, $move;
+
+        my ($col, $row) = split /,/, $to;
+        $col += $dcol;
+        $row += $drow;
         $train->from($to);
-        $train->to($neighbours[0]);
+        $train->to("$col,$row");
     }
 
     $train->frac($frac);
@@ -231,6 +251,27 @@ sub _on_b_quit {
 
 
 #
+# _on_c_b1_dblclick( [], [$stuff, $x, $y] );
+#
+# called when double-clicking left button. switch the node if possible
+# (Games::RailRoad::Node::Switch).
+#
+sub _on_c_b1_dblclick {
+    my ($k,$h, $args) = @_[KERNEL, HEAP, ARG1];
+    my (undef, $x, $y) = @$args;
+
+    # resolve column & row.
+    my ($pos, $col, $row) = _resolve_coords($x,$y,0.5);
+    my $node = $h->{nodes}{$pos};
+    return unless defined($node);
+
+    # switch the exits.
+    $node->switch;
+    $node->draw($h->{w}{canvas}, $TILELEN);
+}
+
+
+#
 # _on_c_b1_motion( [], [$stuff, $x, $y] );
 #
 # called when the mouse is moving on canvas while button is down.
@@ -239,34 +280,47 @@ sub _on_c_b1_motion {
     my ($k,$h, $args) = @_[KERNEL, HEAP, ARG1];
     my (undef, $x, $y) = @$args;
 
-    # resolve row & column.
-    my ($newpos, $newrow, $newcol) = _resolve_coords($x,$y,3);
-    return unless defined $newpos;
+    # resolve column & row.
+    my ($newpos, $newcol, $newrow) = _resolve_coords($x,$y,2/5);
+    my ($oldpos, $oldcol, $oldrow) = @{ $h->{position} };
 
-    # check if we moved somehow.
-    my $oldpos = $h->{curpos};
-    return if defined($oldpos) && $oldpos eq $newpos;
+    # basic checks.
+    return unless defined $newpos;                     # new position is undef
+    return if defined($oldpos) && $oldpos eq $newpos;  # we did not move
 
-    # check if old position was defined.
-    if ( defined $oldpos ) {
-        my ($oldrow, $oldcol) = split /,/, $oldpos;
+    # we moved: store new position & create new node.
+    $h->{position} = [$newpos, $newcol, $newrow];
+    if ( not exists $h->{nodes}{$newpos} ) {
+        my $n = Games::RailRoad::Node->new({col=>$newcol,row=>$newrow});
+        $h->{nodes}{$newpos} = $n;
+    }
+    my $newnode = $h->{nodes}{$newpos};
 
-        if ( abs( $newrow - $oldrow ) < 2 &&
-             abs( $newcol - $oldcol ) < 2 ) {
-            # add the new rail.
-            $h->{graph}->add_edge( $oldpos, $newpos );
-            $h->{w}{canvas}->createLine(
-                $oldcol * $TILELEN,
-                $oldrow * $TILELEN,
-                $newcol * $TILELEN,
-                $newrow * $TILELEN,
-                -tags => [ "$oldpos-$newpos" ],
-            );
-        }
+    # try to resolve old position.
+    return unless defined $oldpos;
+    my $oldnode = $h->{nodes}{$oldpos};
+
+    # check if the move is a single segment.
+    my $movex = $newcol - $oldcol;
+    my $movey = $newrow - $oldrow;
+    my $newmove = join ',',  $movex,  $movey;
+    my $oldmove = join ',', -$movex, -$movey;
+    my $newdir = _dir_coords( $newmove );
+    my $olddir = _dir_coords( $oldmove );
+    if ( not defined $newdir ) {
+        warn "cannot move according to ($newmove)\n";
+        return;
     }
 
-    # store current position.
-    $h->{curpos} = $newpos;
+    # check if we can morph the nodes with this move.
+    return unless $oldnode->connectable($newdir)
+        && $newnode->connectable($olddir);
+    $oldnode->connect($newdir);
+    $newnode->connect($olddir);
+
+    # redraw the 2 nodes.
+    $oldnode->draw( $h->{w}{canvas}, $TILELEN );
+    $newnode->draw( $h->{w}{canvas}, $TILELEN );
 }
 
 
@@ -279,11 +333,17 @@ sub _on_c_b1_press {
     my ($k,$h, $args) = @_[KERNEL, HEAP, ARG1];
     my (undef, $x, $y) = @$args;
 
-    # resolve row & column.
-    my ($pos, $row, $col) = _resolve_coords($x,$y,3);
+    # resolve column & row.
+    my ($pos, $col, $row) = _resolve_coords($x,$y,2/5);
 
     # store current position - even undef.
-    $h->{curpos} = $pos;
+    $h->{position} = [$pos, $col, $row];
+
+    # create the node if possible.
+    return unless defined $pos;
+    return if defined $h->{nodes}{$pos};
+    my $node = Games::RailRoad::Node->new({col=>$col,row=>$row});
+    $h->{nodes}{$pos} = $node;
 }
 
 
@@ -296,42 +356,37 @@ sub _on_c_b1_press {
 sub _on_c_b2_press {
     my ($h, $args) = @_[HEAP, ARG1];
     my (undef, $x, $y) = @$args;
-    my $graph = $h->{graph};
 
     return if defined $h->{train}; # only one train
 
-    my ($pos, $row, $col) = _resolve_coords($x,$y,2);
+    my ($pos, $col, $row) = _resolve_coords($x,$y,0.5);
 
-    # check if there's a rail at $pos
-    if ( not $graph->has_vertex($pos) ) {
+    # check if there's a rail at $pos.
+    if ( not exists $h->{nodes}{$pos} ) {
         warn "no rail at ($pos)\n";
         return;
     }
 
-    my @neighbours = $graph->neighbours($pos);
+    # pick a random dir at first.
+    my @dirs = $h->{nodes}{$pos}->connections;
+    if ( scalar @dirs == 0 ) {
+        warn "nowhere to move on\n";
+        return;
+    }
+    my $dir  = $dirs[ rand @dirs ];
+    my $move = _dir_coords($dir);
+    my ($dcol, $drow) = split /,/, $move;
+    $col += $dcol;
+    $row += $drow;
+    my $to = "$col,$row";
+
+    # create the train.
     $h->{train} = Games::RailRoad::Train->new( {
         from => $pos,
-        to   => $neighbours[0],
+        to   => $to,
         frac => 0,
     } );
-    $h->{train}->draw($h->{w}{canvas}, $TILELEN);
-}
-
-
-#
-# _on_c_b3_motion( [], [$stuff, $x, $y] );
-#
-# called when the mouse is moving on canvas while right button is down.
-# this will update the delete area.
-#
-sub _on_c_b3_motion {
-    my ($k,$h, $args) = @_[KERNEL, HEAP, ARG1];
-    my (undef, $x, $y) = @$args;
-
-    my $canvas = $h->{w}{canvas};
-    my $tag = 'delete-area';
-    $canvas->delete($tag);
-    $canvas->createRectangle( $x, $y, @{ $h->{delpos} }, -dash=>'.', -tags=>[$tag] );
+    $h->{train}->draw( $h->{w}{canvas}, $TILELEN );
 }
 
 
@@ -344,60 +399,85 @@ sub _on_c_b3_motion {
 sub _on_c_b3_press {
     my ($h, $args) = @_[HEAP, ARG1];
     my (undef, $x, $y) = @$args;
-    $h->{delpos} = [$x,$y];
-}
+    my ($pos, $col, $row) = _resolve_coords($x,$y,0.5);
 
+    my $node = $h->{nodes}{$pos};
+    return unless defined $node;
 
-#
-# _on_c_b3_release( [], [$stuff, $x, $y] );
-#
-# called when the right-button mouse is released on canvas.  this will
-# actually delete what's enclosed in the delete area.
-#
-sub _on_c_b3_release {
-    my ($k,$h, $args) = @_[KERNEL, HEAP, ARG1];
-    my (undef, $x, $y) = @$args;
-    my $canvas = $h->{w}{canvas};
+    # check if we can remove connection
+    my @connections = sort $node->connections;
+    foreach my $dir ( @connections ) {
+        my ($dcol, $drow) = split /,/, _dir_coords($dir);
+        my $col2 = $col + $dcol;
+        my $row2 = $row + $drow;
+        my $n = $h->{nodes}{"$col2,$row2"};
+        $dcol = -$dcol;
+        $drow = -$drow;
+        my $dir2 = _dir_coords("$dcol,$drow");
 
-    # find tags of elems selected.
-    my $items = $canvas->find('enclosed', $x, $y, @{ $h->{delpos} });
-    my %tags;
-    $tags{$_}++ for map { ($canvas->gettags($_))[0] } @$items;
-
-    # delete the items.
-    foreach my $tag ( keys %tags ) {
-        my ($n1, $n2) = split /-/, $tag;
-        $h->{graph}->delete_edge($n1, $n2);
-        $canvas->delete($tag);
+        if ( ! $n->connectable("-$dir2") ) {
+            warn "($col2,$row2) cannot be disconnected from ($pos) - $dir2\n";
+            return;
+        }
     }
 
-    # delete the delete rectangle.
-    $canvas->delete('delete-area');
+    # remove the connections
+    foreach my $dir ( @connections ) {
+        my ($dcol, $drow) = split /,/, _dir_coords($dir);
+        my $col2 = $col + $dcol;
+        my $row2 = $row + $drow;
+        my $n = $h->{nodes}{"$col2,$row2"};
+        $dcol = -$dcol;
+        $drow = -$drow;
+        my $dir2 = _dir_coords("$dcol,$drow");
+        $n->connect( "-$dir2" );
+        $n->draw( $h->{w}{canvas}, $TILELEN );
+    }
+
+    $node->delete( $h->{w}{canvas} );
+    delete $h->{nodes}{$pos};
 }
 
 
 # -- PRIVATE SUBS
 
 #
-# my ($pos, $row, $col) = _resolve_coords($x, $y, $div);
+# my $coords = _dir_coords( $dir );
+# my $dir    = _dir_coords( $coords );
+#
+# given a direction ('n', 'se', etc.) or some coords ('1,-1', '0,1',
+# etc.), return the corresponding coords or (resp.) dir.
+#
+sub _dir_coords {
+    my @dirs = (
+        '-1,-1' => 'nw',
+        '-1,0'  => 'w',
+        '-1,1'  => 'sw',
+        '0,-1'  => 'n',
+        '0,1'   => 's',
+        '1,-1'  => 'ne',
+        '1,0'   => 'e',
+        '1,1'   => 'se',
+    );
+    my %dir = ( @dirs, reverse @dirs );
+    return $dir{ $_[0] };
+}
+
+
+#
+# my ($pos, $col, $row) = _resolve_coords($x, $y, $precision);
 #
 # the canvas deals with pixels: this sub transforms canvas coordinates
-# ($x,$y) in the $row and $col of the matching node.
+# ($x,$y) in the $col and $row of the matching node.
 #
-# if we're not close enough of a node, precision is not enough: $pos
-# will be undef.
+# if we're not close enough of a node (within a square of $TILELEN times
+# $precision), precision is not enough: $pos will be undef.
 #
-# $div allows one to set the precision: $TILELEN will be divided by
-# $div, and _rersolve_coords() will return a node only if it's in the
-# first (or last) division. that is, if $div == 2, a node will always be
-# returned. if $div == 3, the middle third will return undef. if $div ==
-# 4, then the half segment will return undef.
-#
-# $pos is the string "$row-$col".
+# $pos is the string "$col-$row".
 #
 #
 sub _resolve_coords {
-    my ($x, $y, $div) = @_;
+    my ($x, $y, $prec) = @_;
 
     my $col = int( $x/$TILELEN );
     my $row = int( $y/$TILELEN );
@@ -406,17 +486,17 @@ sub _resolve_coords {
     $x %= $TILELEN;
     $y %= $TILELEN;
     given ($x) {
-        when( $_ > $TILELEN * ($div-1)/$div ) { $col++; }
-        when( $_ < $TILELEN / $div          ) { } # nothing to do
-        default { return; }                       # not precise enough
+        when( $_ > $TILELEN * (1-$prec) ) { $col++; }
+        when( $_ < $TILELEN * $prec     ) { } # nothing to do
+        default { return; }                   # not precise enough
     }
     given ($y) {
-        when( $_ > $TILELEN * ($div-1)/$div ) { $row++; }
-        when( $_ < $TILELEN / $div          ) { } # nothing to do
-        default { return; }                       # not precise enough
+        when( $_ > $TILELEN * (1-$prec) ) { $row++; }
+        when( $_ < $TILELEN * $prec     ) { } # nothing to do
+        default { return; }                   # not precise enough
     }
 
-    return ("$row,$col", $row, $col);
+    return ("$col,$row", $col, $row);
 }
 
 
@@ -471,10 +551,11 @@ Currently the module is very rough and supports very few operations:
 =item * drawing and connecting rails by left-clicking and dragging mouse
 on the canvas.
 
-=item * selecting an area to be deleted by right-clicking and dragging
-mouse on the canvas.
+=item * removing a node by right-clicking on it on the canvas.
 
 =item * placing a train on a rail by middle-clikcing on a rail on the canvas.
+
+=item * changing switch exits by double-clicking on it.
 
 =back
 
@@ -484,16 +565,7 @@ limited to):
 
 =over 4
 
-=item * support for "end-of-road" nodes (without any more edges)
-
 =item * support for more than one train
-
-=item * support for switches on nodes with more than 2 edges
-
-=item * support for "impossible" nodes (no 90-turn, no more than 4
-edges)
-
-=item * prettier drawing of rails
 
 =item * adding coaches to trains
 
