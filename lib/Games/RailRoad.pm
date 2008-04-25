@@ -12,17 +12,27 @@ use strict;
 use warnings;
 use 5.010;
 
+use File::Basename;
+use File::HomeDir;
+use File::Path;
+use File::Spec::Functions;
 use Games::RailRoad::Node;
 use Games::RailRoad::Train;
 use Games::RailRoad::Vector;
 use Readonly;
 use Tk; # should come before POE
+use Tk::PNG;
 use Tk::ToolBar;
+use UNIVERSAL::require;
+use YAML qw{ DumpFile LoadFile };
 use POE;
 
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
+Readonly my $HOME    => File::HomeDir->my_home;
+Readonly my $GRHOME  => catfile( $HOME, qw{ .perl Games::RailRoad } );
+Readonly my $SAVEDIR => catfile( $GRHOME, 'savedir' );
 Readonly my $NBCOLS  => 60;
 Readonly my $NBROWS  => 40;
 Readonly my $TILELEN => 20;    # in pixels
@@ -45,12 +55,18 @@ sub spawn {
     my $session = POE::Session->create(
         inline_states => {
             # special poe events
-            _start           => \&_on_start,
+            _start           => \&_do_start,
             # public events
             # private events
-            _tick            => \&_on_tick,
+            _new             => \&_do_new,
+            _open            => \&_do_open,
+            _save            => \&_do_save,
+            _tick            => \&_do_tick,
             # gui events
+            _b_new           => \&_on_b_new,
+            _b_open          => \&_on_b_open,
             _b_quit          => \&_on_b_quit,
+            _b_save          => \&_on_b_save,
             _c_b1_dblclick   => \&_on_c_b1_dblclick,
             _c_b1_motion     => \&_on_c_b1_motion,
             _c_b1_press      => \&_on_c_b1_press,
@@ -69,11 +85,68 @@ sub spawn {
 # -- PRIVATE EVENTS
 
 #
-# _on_start( \%opts );
+# _new();
+#
+# reinits the various params to start anew.
+#
+sub _do_new {
+    my $h = $_[HEAP];
+
+    # various heap initialization.
+    $h->{nodes} = {};
+    $h->{train} = undef;
+
+    # clear the canvas.
+    my $canvas = $h->{w}{canvas};
+    $canvas->delete('all');
+    $canvas->createGrid( 0, 0, $TILELEN, $TILELEN, -lines => 0 );
+}
+
+
+#
+# _open($file);
+#
+# load a game from $file.
+#
+sub _do_open {
+    my ($h, $file) = @_[HEAP, ARG0];
+    my $save = LoadFile($file);
+    warn "uh, loading a file from the future\n" if $save->{version} > $VERSION;
+
+    # load node classes, to be able to bless loaded nodes.
+    use Module::Pluggable search_path => 'Games::RailRoad::Node', sub_name => 'nodes';
+    $_->require for __PACKAGE__->nodes;
+
+    # load nodes and draw them.
+    $h->{nodes} = $save->{nodes};
+    $_->draw($h->{w}{canvas}, $TILELEN) foreach values %{ $h->{nodes} };
+}
+
+
+#
+# _save($file);
+#
+# save the current game to $file.
+#
+sub _do_save {
+    my ($h, $file) = @_[HEAP, ARG0];
+    return unless defined $file;
+
+    # select what to save.
+    my $save = {
+        version => $VERSION,    # one never knows
+        nodes   => $h->{nodes},
+    };
+    DumpFile($file, $save);
+}
+
+
+#
+# _do_start( \%opts );
 #
 # session initialization. %opts is received from spawn();
 #
-sub _on_start {
+sub _do_start {
     my ($k, $h, $s, $opts) = @_[ KERNEL, HEAP, SESSION, ARG0 ];
 
     #-- create gui
@@ -82,70 +155,76 @@ sub _on_start {
     # see http://www.perltk.org/index.php?option=com_content&task=view&id=43&Itemid=37
     $poe_main_window->optionAdd('*BorderWidth' => 1);
 
-    # menu
-    $poe_main_window->optionAdd('*tearOff', 'false'); # no tear-off menus
-    my $menuitems = [
-        [ Cascade => '~File', -menuitems => [
-            [ Button => '~Open',
-                -command     => $s->postback('_b_open'),
-                -accelerator => 'ctrl+o',
-                -compound    => 'left',
-                -image       => $poe_main_window->Photo('fileopen16'),
-                ],
-            [ Separator => '' ],
-            [ Button => '~Quit',
-                -command     => $s->postback('_b_quit'),
-                -accelerator => 'ctrl+q',
-                -compound    => 'left',
-                -image       => $poe_main_window->Photo('actexit16'),
-                ],
-            ],
-        ],
-        [ Cascade => '~Run', -menuitems => [
-            [ Button => '~Restart',
-                -command     => $s->postback('_b_restart'),
-                -accelerator => 'R',
-                -compound    => 'left',
-                -image       => $poe_main_window->Photo('playstart16'),
-                ],
-            [ Button => '~Pause',
-                -command     => $s->postback('_b_pause'),
-                -accelerator => 'p',
-                -compound    => 'left',
-                -image       => $poe_main_window->Photo('playpause16'),
-                ],
-            [ Button => '~Next',
-                -command     => $s->postback('_b_next'),
-                -accelerator => 'n',
-                -compound    => 'left',
-                -image       => $poe_main_window->Photo('nav1rightarrow16'),
-                ],
-            [ Button => '~Continue',
-                -command     => $s->postback('_b_continue'),
-                -accelerator => 'c',
-                -compound    => 'left',
-                -image       => $poe_main_window->Photo('nav2rightarrow16'),
-                ],
-            [ Separator => '' ],
-            [ Button => '~Breakpoints',
-                -command     => $s->postback('_b_breakpoints'),
-                #-accelerator => 'c',
-                -compound    => 'left',
-                -image       => $poe_main_window->Photo('calbell16'),
-                ],
-            ],
-        ],
-    ];
-    my $menubar = $poe_main_window->Menu( -menuitems => $menuitems );
-    $poe_main_window->configure( -menu => $menubar );
-    $h->{w}{mnu_run} = $menubar->entrycget(1, '-menu');
+    # icon
+    my $path = catfile( dirname($INC{'Games/RailRoad/Node.pm'}), qw{ share icons main.png } );
+    my $image = $poe_main_window->Photo('-format'=>'png', -file=>$path);
+    $poe_main_window->iconimage($image);
 
+    # menu
+#    $poe_main_window->optionAdd('*tearOff', 'false'); # no tear-off menus
+#    my $menuitems = [
+#        [ Cascade => '~File', -menuitems => [
+#            [ Button => '~Open',
+#                -command     => $s->postback('_b_open'),
+#                -accelerator => 'ctrl+o',
+#                -compound    => 'left',
+#                -image       => $poe_main_window->Photo('fileopen16'),
+#                ],
+#            [ Separator => '' ],
+#            [ Button => '~Quit',
+#                -command     => $s->postback('_b_quit'),
+#                -accelerator => 'ctrl+q',
+#                -compound    => 'left',
+#                -image       => $poe_main_window->Photo('actexit16'),
+#                ],
+#            ],
+#        ],
+#        [ Cascade => '~Run', -menuitems => [
+#            [ Button => '~Restart',
+#                -command     => $s->postback('_b_restart'),
+#                -accelerator => 'R',
+#                -compound    => 'left',
+#                -image       => $poe_main_window->Photo('playstart16'),
+#                ],
+#            [ Button => '~Pause',
+#                -command     => $s->postback('_b_pause'),
+#                -accelerator => 'p',
+#                -compound    => 'left',
+#                -image       => $poe_main_window->Photo('playpause16'),
+#                ],
+#            [ Button => '~Next',
+#                -command     => $s->postback('_b_next'),
+#                -accelerator => 'n',
+#                -compound    => 'left',
+#                -image       => $poe_main_window->Photo('nav1rightarrow16'),
+#                ],
+#            [ Button => '~Continue',
+#                -command     => $s->postback('_b_continue'),
+#                -accelerator => 'c',
+#                -compound    => 'left',
+#                -image       => $poe_main_window->Photo('nav2rightarrow16'),
+#                ],
+#            [ Separator => '' ],
+#            [ Button => '~Breakpoints',
+#                -command     => $s->postback('_b_breakpoints'),
+#                #-accelerator => 'c',
+#                -compound    => 'left',
+#                -image       => $poe_main_window->Photo('calbell16'),
+#                ],
+#            ],
+#        ],
+#    ];
+#    my $menubar = $poe_main_window->Menu( -menuitems => $menuitems );
+#    $poe_main_window->configure( -menu => $menubar );
+#    $h->{w}{mnu_run} = $menubar->entrycget(1, '-menu');
 
     # toolbar
     my @tb = (
         [ 'Button', 'actexit16',        'quit',        '<Control-q>', '_b_quit' ],
-        #[ 'Button', 'fileopen16',       'open',        '<Control-o>', '_b_open' ],
-        #[ 'separator' ],
+        [ 'separator' ],
+        [ 'Button', 'filenew16',        'new',         '<Control-n>', '_b_new' ],
+        [ 'Button', 'fileopen16',       'open',        '<Control-o>', '_b_open' ],
+        [ 'Button', 'filesave16',       'save',        '<Control-s>', '_b_save' ],
         #[ 'Button', 'calbell16',        'breakpoints', '<F8>',        '_b_breakpoints' ],
         #[ 'separator' ],
         #[ 'Button', 'playstart16',      'restart',     '<R>',         '_b_restart' ],
@@ -174,7 +253,6 @@ sub _on_start {
         -height     => $NBROWS * $TILELEN,
         #-browsecmd  => $s->postback('_tm_click'),
     )->pack(-side=>'left', -fill=>'both', -expand=>1);
-    $c->createGrid( 0, 0, $TILELEN, $TILELEN, -lines => 0 );
     $h->{w}{canvas} = $c;
 
     # binding canvas events.
@@ -188,37 +266,38 @@ sub _on_start {
     $c->CanvasBind($_ , [$s->postback($event{$_}), Ev('x'), Ev('y')] )
         foreach keys %event;
 
-    # -- various heap initializations
-    $h->{nodes} = {};
-    #$h->{graph} = Graph->new( undirected => 1 );
-    $h->{train} = undef;
-    #$k->yield( $opts->{file} ? ('_open_file', $opts->{file}) : '_b_open' );
 
-    #
+    #-- finish initialization
+    $k->yield( '_new' );
     $k->delay_set( '_tick', $TICK );
 }
 
 
-sub _on_tick {
+sub _do_tick {
     my ($k, $h) = @_[KERNEL, HEAP];
 
     $k->delay_set( '_tick', $TICK );
     my $train = $h->{train};
     return unless defined $train;
 
+    # fetch current nodes for $train
+    my $from = $train->from;
+    my $to   = $train->to;
+    my $move = $from - $to;   # note it's from minus to
+    my $dir  = $move->as_dir;
+
+    # move the train 1/5 of rail further. of course, for diagonals we
+    # need to apply a cos(pi/4) factor (equals to sqrt(2)/2), otherwise
+    # the train would be moving faster in diagonals than in vertical /
+    # horizontal rails.
     my $frac = $train->frac;
-    $frac += 1/5;
+    $frac += $dir ~~ [ qw{ e n s w } ] ? 1/5 : sqrt(2)/10;
+
     if ( $frac >= 1 ) {
         # eh, changing node.
         $frac -= 1;
 
-        # fetch current nodes for $train
-        my $from = $train->from;
-        my $to   = $train->to;
-
         # get next direction (note it's from minus to)
-        my $move = $from - $to;
-        my $dir  = $move->as_dir;
         my $nextdir = $h->{nodes}{"$to"}->next_dir($dir);
         return unless defined $nextdir; # dead-end
 
@@ -235,6 +314,47 @@ sub _on_tick {
 
 # -- GUI EVENTS
 
+
+#
+# _b_new();
+#
+# called when the user wants to begin a new game.
+#
+sub _on_b_new {
+    $_[KERNEL]->yield('_new');
+}
+
+
+#
+# _b_open();
+#
+# called when the user wants to open a saved game.
+#
+sub _on_b_open {
+    my $k = $_[KERNEL];
+
+    # create savedir if needed.
+    mkpath( $SAVEDIR );
+
+    # prompt for save file - yes, i know, it freezes poe.
+    my $file = $poe_main_window->getOpenFile(
+        -defaultextension => '.yaml',
+		-filetypes        => [
+		    ['YAML files', '.yaml' ],
+		    ['All Files',  '*',    ],
+		],
+        -initialdir       => $SAVEDIR,
+        #-initialfile      => "getopenfile",
+        #-title            => "Your customized title",
+    );
+    return unless defined $file;
+
+    # reinit & open file.
+    $k->yield('_new');
+    $k->yield('_open', $file);
+}
+
+
 #
 # _b_quit();
 #
@@ -246,10 +366,37 @@ sub _on_b_quit {
 
 
 #
-# _on_c_b1_dblclick( [], [$stuff, $x, $y] );
+# _b_save();
 #
-# called when double-clicking left button. switch the node if possible
-# (Games::RailRoad::Node::Switch).
+# called when the user wants to save the current game.
+#
+sub _on_b_save {
+    # create savedir if needed.
+    mkpath( $SAVEDIR );
+
+    # prompt for save file - yes, i know, it freezes poe.
+    my $file = $poe_main_window->getSaveFile(
+        -defaultextension => '.yaml',
+		-filetypes        => [
+		    ['YAML files', '.yaml' ],
+		    ['All Files',  '*',    ],
+		],
+        -initialdir       => $SAVEDIR,
+        #-initialfile      => "getopenfile",
+        #-title            => "Your customized title",
+    );
+    return unless defined $file;
+    $file .= '.yaml' unless $file =~ /\.yaml$/;
+
+    $_[KERNEL]->yield('_save', $file);
+}
+
+
+#
+# _c_b1_dblclick( [], [$stuff, $x, $y] );
+#
+# called when double-clicking left button on canvas. switch the node if
+# possible (Games::RailRoad::Node::Switch).
 #
 sub _on_c_b1_dblclick {
     my ($k,$h, $args) = @_[KERNEL, HEAP, ARG1];
@@ -267,9 +414,10 @@ sub _on_c_b1_dblclick {
 
 
 #
-# _on_c_b1_motion( [], [$stuff, $x, $y] );
+# _c_b1_motion( [], [$stuff, $x, $y] );
 #
 # called when the mouse is moving on canvas while button is down.
+# creates and link rails together.
 #
 sub _on_c_b1_motion {
     my ($k,$h, $args) = @_[KERNEL, HEAP, ARG1];
@@ -316,9 +464,10 @@ sub _on_c_b1_motion {
 
 
 #
-# _on_c_b1_press( [], [$stuff, $x, $y] );
+# _c_b1_press( [], [$stuff, $x, $y] );
 #
-# called when the button mouse is pressed on canvas.
+# called when the button mouse is pressed on canvas. register position
+# to create rail, to be dragged later on.
 #
 sub _on_c_b1_press {
     my ($k,$h, $args) = @_[KERNEL, HEAP, ARG1];
@@ -339,7 +488,7 @@ sub _on_c_b1_press {
 
 
 #
-# _on_c_b2_press( [], [$stuff, $x, $y] );
+# _c_b2_press( [], [$stuff, $x, $y] );
 #
 # called when the right-button mouse is pressed on canvas. this will
 # place a new train.
@@ -378,7 +527,7 @@ sub _on_c_b2_press {
 
 
 #
-# _on_c_b3_press( [], [$stuff, $x, $y] );
+# _c_b3_press( [], [$stuff, $x, $y] );
 #
 # called when the right-button mouse is pressed on canvas. this will
 # mark the beginning corner of the delete area.
@@ -528,8 +677,6 @@ limited to):
 =item * support for more than one train
 
 =item * adding coaches to trains
-
-=item * fixing speed change in diagonal rails
 
 =item * saving / loading to a file
 
