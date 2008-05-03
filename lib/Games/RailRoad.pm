@@ -28,7 +28,7 @@ use YAML qw{ DumpFile LoadFile };
 use POE;
 
 
-our $VERSION = '0.04';
+our $VERSION = '1.00';
 
 Readonly my $HOME    => File::HomeDir->my_home;
 Readonly my $GRHOME  => catfile( $HOME, qw{ .perl Games::RailRoad } );
@@ -93,8 +93,8 @@ sub _do_new {
     my $h = $_[HEAP];
 
     # various heap initialization.
-    $h->{nodes} = {};
-    $h->{train} = undef;
+    $h->{nodes}  = {};
+    $h->{trains} = [];
 
     # clear the canvas.
     my $canvas = $h->{w}{canvas};
@@ -120,6 +120,10 @@ sub _do_open {
     # load nodes and draw them.
     $h->{nodes} = $save->{nodes};
     $_->draw($h->{w}{canvas}, $TILELEN) foreach values %{ $h->{nodes} };
+
+    # load trains and draw them.
+    $h->{trains} = $save->{trains};
+    $_->draw($h->{w}{canvas}, $TILELEN) foreach values %{ $h->{train} };
 }
 
 
@@ -136,6 +140,7 @@ sub _do_save {
     my $save = {
         version => $VERSION,    # one never knows
         nodes   => $h->{nodes},
+        trains  => $h->{trains},
     };
     DumpFile($file, $save);
 }
@@ -277,38 +282,38 @@ sub _do_tick {
     my ($k, $h) = @_[KERNEL, HEAP];
 
     $k->delay_set( '_tick', $TICK );
-    my $train = $h->{train};
-    return unless defined $train;
 
-    # fetch current nodes for $train
-    my $from = $train->from;
-    my $to   = $train->to;
-    my $move = $from - $to;   # note it's from minus to
-    my $dir  = $move->as_dir;
+    foreach my $train ( @{ $h->{trains} } ) {
+        # fetch current nodes for $train
+        my $from = $train->from;
+        my $to   = $train->to;
+        my $move = $from - $to;   # note it's from minus to
+        my $dir  = $move->as_dir;
 
-    # move the train 1/5 of rail further. of course, for diagonals we
-    # need to apply a cos(pi/4) factor (equals to sqrt(2)/2), otherwise
-    # the train would be moving faster in diagonals than in vertical /
-    # horizontal rails.
-    my $frac = $train->frac;
-    $frac += $dir ~~ [ qw{ e n s w } ] ? 1/5 : sqrt(2)/10;
+        # move the train 1/5 of rail further. of course, for diagonals we
+        # need to apply a cos(pi/4) factor (equals to sqrt(2)/2), otherwise
+        # the train would be moving faster in diagonals than in vertical /
+        # horizontal rails.
+        my $frac = $train->frac;
+        $frac += $dir ~~ [ qw{ e n s w } ] ? 1/5 : sqrt(2)/10;
 
-    if ( $frac >= 1 ) {
-        # eh, changing node.
-        $frac -= 1;
+        if ( $frac >= 1 ) {
+            # eh, changing node.
+            $frac -= 1;
 
-        # get next direction (note it's from minus to)
-        my $nextdir = $h->{nodes}{"$to"}->next_dir($dir);
-        return unless defined $nextdir; # dead-end
+            # get next direction (note it's from minus to)
+            my $nextdir = $h->{nodes}{"$to"}->next_dir($dir);
+            next unless defined $nextdir; # dead-end
 
-        # update current nodes for $train
-        my $vec = Games::RailRoad::Vector->new_dir($nextdir);
-        $train->from( $to );
-        $train->to( $to + $vec );
+            # update current nodes for $train
+            my $vec = Games::RailRoad::Vector->new_dir($nextdir);
+            $train->from( $to );
+            $train->to( $to + $vec );
+        }
+
+        $train->frac($frac);
+        $train->draw( $h->{w}{canvas}, $TILELEN );
     }
-
-    $train->frac($frac);
-    $train->draw( $h->{w}{canvas}, $TILELEN );
 }
 
 
@@ -497,7 +502,7 @@ sub _on_c_b2_press {
     my ($h, $args) = @_[HEAP, ARG1];
     my (undef, $x, $y) = @$args;
 
-    return if defined $h->{train}; # only one train
+    #return if defined $h->{train}; # only one train
 
     my $vec = _resolve_coords($x,$y,0.5);
 
@@ -517,12 +522,15 @@ sub _on_c_b2_press {
     my $move = Games::RailRoad::Vector->new_dir($dir);
 
     # create the train.
-    $h->{train} = Games::RailRoad::Train->new( {
+    my $train = Games::RailRoad::Train->new( {
         from => $vec,
         to   => $vec + $move,
         frac => 0,
     } );
-    $h->{train}->draw( $h->{w}{canvas}, $TILELEN );
+    $train->draw( $h->{w}{canvas}, $TILELEN );
+
+    # store the train
+    push @{ $h->{trains} }, $train;
 }
 
 
@@ -595,13 +603,13 @@ sub _resolve_coords {
     $x %= $TILELEN;
     $y %= $TILELEN;
     given ($x) {
-        when( $_ > $TILELEN * (1-$prec) ) { $col++; }
-        when( $_ < $TILELEN * $prec     ) { } # nothing to do
+        when( $_ >  $TILELEN * (1-$prec) ) { $col++; }
+        when( $_ <= $TILELEN * $prec     ) { } # nothing to do
         default { return; }                   # not precise enough
     }
     given ($y) {
-        when( $_ > $TILELEN * (1-$prec) ) { $row++; }
-        when( $_ < $TILELEN * $prec     ) { } # nothing to do
+        when( $_ >  $TILELEN * (1-$prec) ) { $row++; }
+        when( $_ <= $TILELEN * $prec     ) { } # nothing to do
         default { return; }                   # not precise enough
     }
 
@@ -664,7 +672,11 @@ on the canvas.
 
 =item * placing a train on a rail by middle-clikcing on a rail on the canvas.
 
+=item * support for more than one train
+
 =item * changing switch exits by double-clicking on it.
+
+=item * saving / loading to a file
 
 =back
 
@@ -674,11 +686,7 @@ limited to):
 
 =over 4
 
-=item * support for more than one train
-
 =item * adding coaches to trains
-
-=item * saving / loading to a file
 
 =item * rc-file for the application
 
