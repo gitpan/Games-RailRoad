@@ -1,31 +1,46 @@
-#
-# This file is part of Games::RailRoad.
-# Copyright (c) 2001-2008 Jerome Quelin, all rights reserved.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the same terms as Perl itself.
-#
-#
-
-package Games::RailRoad::Vector;
-
+# 
+# This file is part of Games-RailRoad
+# 
+# This software is copyright (c) 2008 by Jerome Quelin.
+# 
+# This is free software; you can redistribute it and/or modify it under
+# the same terms as the Perl 5 programming language system itself.
+# 
+use 5.010;
 use strict;
 use warnings;
-use integer;
 
+package Games::RailRoad::Vector;
+BEGIN {
+  $Games::RailRoad::Vector::VERSION = '1.101330';
+}
+# ABSTRACT: an opaque vector class.
+
+use Moose;
+use MooseX::Has::Sugar;
+use MooseX::SemiAffordanceAccessor;
 use Readonly;
-use base qw{ Class::Accessor::Fast };
-__PACKAGE__->mk_accessors( qw{ x y } );
 
 use overload
-	'='   => \&copy,
-	'+'   => \&_add,
-	'-'   => \&_substract,
-	'neg' => \&_invert,
-	'+='  => \&_add_inplace,
+    '='   => \&copy,
+    '+'   => \&_add,
+    '-'   => \&_substract,
+    'neg' => \&_invert,
+    '+='  => \&_add_inplace,
     '-='  => \&_substract_inplace,
     '<=>' => \&_compare,
-	'""'  => \&as_string;
+    '""'  => \&as_string;
+
+
+
+# -- attributes
+
+
+has posx => ( rw, isa=>'Int', default=>0 );
+has posy => ( rw, isa=>'Int', default=>0 );
+
+
+# -- private vars
 
 Readonly my %coords2dir => (
     '(-1,-1)' => 'nw',
@@ -47,45 +62,23 @@ Readonly my %dir2coords => (
     'e'  => [ 1, 0],
     'se' => [ 1, 1],
 );
- 
-
-# -- CONSTRUCTORS
-
-#
-# my $vec = GR::Vector->new( $x,$y );
-#
-# Create a new vector. The arguments are a couple of integer
-# representing the x and y coordinates.
-#
-sub new {
-	my $pkg = shift;
-
-    # regular GRV object
-    my $self = { x=>$_[0], y=>$_[1] };
-    bless $self, $pkg;
-	return $self;
-}
 
 
-#
-# my $vec = GR::Vector->new_dir( $dir );
-#
-# Create a new vector, from a given direction. The recognized directions
-# are C<e>, C<n>, C<ne>, C<nw>, C<s>, C<se>, C<sw>, C<w>.
-#
+# -- constructors & initializers
+
+
+# provided by moose
+
+
+
 sub new_dir {
-	my ($pkg, $dir) = @_;
-
-    return $pkg->new( @{ $dir2coords{$dir} } );
+    my ($pkg, $dir) = @_;
+    my ($x, $y) = @{ $dir2coords{$dir} };
+    return $pkg->new( { posx=>$x, posy=>$y } );
 }
 
 
-#
-# my $vec = $v->copy;
-#
-# Return a new GRV object, which has the same dimensions and coordinates
-# as $v.
-#
+
 sub copy {
     my $vec = shift;
     return bless {%$vec}, ref $vec;
@@ -104,8 +97,8 @@ sub copy {
 # like "(1,2)".
 #
 sub as_string {
-	my $self = shift;
-	return '(' . $self->x . ',' . $self->y . ')';
+    my $self = shift;
+    return '(' . $self->posx . ',' . $self->posy . ')';
 }
 
 
@@ -132,11 +125,11 @@ sub as_dir {
 # Return a new GRV object, which is the result of $v1 plus $v2.
 #
 sub _add {
-	my ($v1, $v2) = @_;
-    my $rv = ref($v1)->new( {x=>0, y=>0} );
-    $rv->x( $v1->x + $v2->x );
-    $rv->y( $v1->y + $v2->y );
-	return $rv;
+    my ($v1, $v2) = @_;
+    my $rv = ref($v1)->new;
+    $rv->set_posx( $v1->posx + $v2->posx );
+    $rv->set_posy( $v1->posy + $v2->posy );
+    return $rv;
 }
 
 
@@ -147,11 +140,11 @@ sub _add {
 # Return a new GRV object, which is the result of $v1 minus $v2.
 #
 sub _substract {
-	my ($v1, $v2) = @_;
-    my $rv = ref($v1)->new( {x=>0, y=>0} );
-    $rv->x( $v1->x - $v2->x );
-    $rv->y( $v1->y - $v2->y );
-	return $rv;
+    my ($v1, $v2) = @_;
+    my $rv = ref($v1)->new;
+    $rv->set_posx( $v1->posx - $v2->posx );
+    $rv->set_posy( $v1->posy - $v2->posy );
+    return $rv;
 }
 
 
@@ -166,10 +159,10 @@ sub _substract {
 #
 sub _invert {
     my ($v1) = @_;
-    my $rv = ref($v1)->new( {x=>0, y=>0} );
-    $rv->x( - $v1->x );
-    $rv->y( - $v1->y );
-	return $rv;
+    my $rv = ref($v1)->new;
+    $rv->set_posx( - $v1->posx );
+    $rv->set_posy( - $v1->posy );
+    return $rv;
 }
 
 
@@ -182,9 +175,9 @@ sub _invert {
 #
 sub _add_inplace {
     my ($v1, $v2) = @_;
-    $v1->x( $v1->x + $v2->x );
-    $v1->y( $v1->y + $v2->y );
-	return $v1;
+    $v1->set_posx( $v1->posx + $v2->posx );
+    $v1->set_posy( $v1->posy + $v2->posy );
+    return $v1;
 }
 
 
@@ -196,9 +189,9 @@ sub _add_inplace {
 #
 sub _substract_inplace {
     my ($v1, $v2) = @_;
-    $v1->x( $v1->x - $v2->x );
-    $v1->y( $v1->y - $v2->y );
-	return $v1;
+    $v1->set_posx( $v1->posx - $v2->posx );
+    $v1->set_posy( $v1->posy - $v2->posy );
+    return $v1;
 }
 
 
@@ -213,26 +206,28 @@ sub _substract_inplace {
 #
 sub _compare {
     my ($v1, $v2) = @_;
-    return 1 if $v1->x != $v2->x;
-    return 1 if $v1->y != $v2->y;
+    return 1 if $v1->posx != $v2->posx;
+    return 1 if $v1->posy != $v2->posy;
     return 0;
 }
 
 
 1;
-__END__
+
+
+=pod
 
 =head1 NAME
 
 Games::RailRoad::Vector - an opaque vector class.
 
+=head1 VERSION
 
+version 1.101330
 
 =head1 SYNOPSIS
 
-    my $v1 = Games::RailRoad::Vector->new(...);
-
-
+    my $v1 = Games::RailRoad::Vector->new( \%params );
 
 =head1 DESCRIPTION
 
@@ -240,28 +235,31 @@ This class abstracts basic vector manipulation. It lets you pass around
 one argument to your functions, do vector arithmetic and various string
 representation.
 
+=head1 ATTRIBUTES
 
+=head2 posx
 
-=head1 CONSTRUCTORS
+The x coordinate of the vector. Default to 0.
 
-=head2 my $vec = GR::Vector->new( $x, $y );
+=head2 posy
 
-Create a new vector. The arguments are the x and y coordinates.
+The y coordinate of the vector. Default to 0.
 
+=head1 METHODS
 
+=head2 my $vec = GR::Vector->new( \%params );
+
+Create and return a new vector. Accept a hash reference with the
+attribute values.
 
 =head2 my $vec = GR::Vector->new_dir( $dir );
 
 Create a new vector, from a given direction. The recognized directions
 are C<e>, C<n>, C<ne>, C<nw>, C<s>, C<se>, C<sw>, C<w>.
 
-
-
 =head2 my $vec = $v->copy;
 
-Return a new GRV object, which has the same coordinates as $v.
-
-
+Return a new GRV object, which has the same coordinates as C<$v>.
 
 =head1 PUBLIC METHODS
 
@@ -273,14 +271,10 @@ might look like C<(1,2)>.
 This method is also applied to stringification, ie when one forces
 string context (C<"$vec">).
 
-
-
 =head2 my $str = $vec->as_dir;
 
 Return the cardinal direction (n, sw, etc.) of $vec if it's a unit
 vector (ok, (1,1) is not a unit vector but you see my point).
-
-
 
 =head1 MATHEMATICAL OPERATIONS
 
@@ -302,8 +296,6 @@ will subtracts C<$v1> from the origin, and effectively, gives the
 inverse of the original vector. The new vector is the same distance from
 the origin, in the opposite direction.
 
-
-
 =head2 Inplace operations
 
 GRV objects also supports inplace mathematical operations:
@@ -314,7 +306,6 @@ GRV objects also supports inplace mathematical operations:
 effectively adds / substracts C<$v2> to / from C<$v1>, and stores the
 result back into C<$v1>.
 
-
 =head2 Comparison
 
 Finally, GRV objects can be tested for equality, ie whether two vectors
@@ -323,27 +314,20 @@ both point at the same spot.
     print "same"   if $v1 == $v2;
     print "differ" if $v1 != $v2;
 
-
-
-=head1 SEE ALSO
-
-L<Games::RailRoad>
-
-
-
 =head1 AUTHOR
 
-Jerome Quelin, C<< <jquelin@cpan.org> >>
+  Jerome Quelin
 
+=head1 COPYRIGHT AND LICENSE
 
+This software is copyright (c) 2008 by Jerome Quelin.
 
-=head1 COPYRIGHT & LICENSE
-
-Copyright (c) 2001-2008 Jerome Quelin, all rights reserved.
-
-This program is free software; you can redistribute it and/or modify
-it under the same terms as Perl itself.
-
+This is free software; you can redistribute it and/or modify it under
+the same terms as the Perl 5 programming language system itself.
 
 =cut
+
+
+__END__
+
 

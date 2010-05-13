@@ -1,34 +1,40 @@
-#
-# This file is part of Games::RailRoad.
-# Copyright (c) 2008 Jerome Quelin, all rights reserved.
-#
-# This program is free software; you can redistribute it and/or modify
-# it under the same terms as Perl itself.
-#
-
-package Games::RailRoad;
-
+# 
+# This file is part of Games-RailRoad
+# 
+# This software is copyright (c) 2008 by Jerome Quelin.
+# 
+# This is free software; you can redistribute it and/or modify it under
+# the same terms as the Perl 5 programming language system itself.
+# 
+use 5.010;
 use strict;
 use warnings;
-use 5.010;
+
+package Games::RailRoad;
+BEGIN {
+  $Games::RailRoad::VERSION = '1.101330';
+}
+# ABSTRACT: a train simulation game
+
+use POE::Kernel { loop => 'Tk' }; # should come first
 
 use File::Basename;
 use File::HomeDir;
 use File::Path;
+use File::ShareDir qw{ dist_dir };
 use File::Spec::Functions;
-use Games::RailRoad::Node;
-use Games::RailRoad::Train;
-use Games::RailRoad::Vector;
+use POE;
 use Readonly;
-use Tk; # should come before POE
+use Tk;
 use Tk::PNG;
 use Tk::ToolBar;
 use UNIVERSAL::require;
 use YAML qw{ DumpFile LoadFile };
-use POE;
 
-
-our $VERSION = '1.00';
+use Games::RailRoad::Node;
+use Games::RailRoad::Train;
+use Games::RailRoad::Vector;
+use Games::RailRoad::Window::Trains;
 
 Readonly my $HOME    => File::HomeDir->my_home;
 Readonly my $GRHOME  => catfile( $HOME, qw{ .perl Games::RailRoad } );
@@ -39,6 +45,17 @@ Readonly my $TILELEN => 20;    # in pixels
 Readonly my $TICK    => 0.050; # in seconds
 
 #Readonly my @COLORS => ( [255,0,0], [0,0,255], [0,255,0], [255,255,0], [255,0,255], [0,255,255] );
+
+our %img =
+    map { $_ => $poe_main_window->Photo(
+            -format => 'png',
+            -file   => catfile(
+                dist_dir('Games-RailRoad'),
+                'icons',
+                "$_.png"
+            ),
+        )
+    } qw{ main train };
 
 
 # -- CONSTRUCTOR
@@ -67,6 +84,7 @@ sub spawn {
             _b_open          => \&_on_b_open,
             _b_quit          => \&_on_b_quit,
             _b_save          => \&_on_b_save,
+            _b_trains        => \&_on_b_trains,
             _c_b1_dblclick   => \&_on_c_b1_dblclick,
             _c_b1_motion     => \&_on_c_b1_motion,
             _c_b1_press      => \&_on_c_b1_press,
@@ -111,11 +129,34 @@ sub _do_new {
 sub _do_open {
     my ($h, $file) = @_[HEAP, ARG0];
     my $save = LoadFile($file);
-    warn "uh, loading a file from the future\n" if $save->{version} > $VERSION;
 
     # load node classes, to be able to bless loaded nodes.
     use Module::Pluggable search_path => 'Games::RailRoad::Node', sub_name => 'nodes';
     $_->require for __PACKAGE__->nodes;
+
+    given ( $save->{version} ) {
+        when ( $_ > __PACKAGE__->VERSION ) {
+            die "uh, loading a file from the future\n"
+        }
+
+        when ( '1.00' ) {
+            warn "converting game saved in version 1.00\n";
+            foreach my $node ( values %{ $save->{nodes} } ) {
+                my $pos = $node->position;
+                $pos->set_posx( delete $pos->{x} );
+                $pos->set_posy( delete $pos->{y} );
+            }
+            foreach my $train ( @{ $save->{trains} } ) {
+                my $from = $train->from;
+                my $to   = $train->to;
+                $from->set_posx( delete $from->{x} );
+                $from->set_posy( delete $from->{y} );
+                $to->set_posx( delete $to->{x} );
+                $to->set_posy( delete $to->{y} );
+            }
+        }
+    }
+
 
     # load nodes and draw them.
     $h->{nodes} = $save->{nodes};
@@ -138,7 +179,7 @@ sub _do_save {
 
     # select what to save.
     my $save = {
-        version => $VERSION,    # one never knows
+        version => __PACKAGE__->VERSION,    # one never knows
         nodes   => $h->{nodes},
         trains  => $h->{trains},
     };
@@ -161,9 +202,7 @@ sub _do_start {
     $poe_main_window->optionAdd('*BorderWidth' => 1);
 
     # icon
-    my $path = catfile( dirname($INC{'Games/RailRoad/Node.pm'}), qw{ share icons main.png } );
-    my $image = $poe_main_window->Photo('-format'=>'png', -file=>$path);
-    $poe_main_window->iconimage($image);
+    $poe_main_window->iconimage($img{main});
 
     # menu
 #    $poe_main_window->optionAdd('*tearOff', 'false'); # no tear-off menus
@@ -230,6 +269,8 @@ sub _do_start {
         [ 'Button', 'filenew16',        'new',         '<Control-n>', '_b_new' ],
         [ 'Button', 'fileopen16',       'open',        '<Control-o>', '_b_open' ],
         [ 'Button', 'filesave16',       'save',        '<Control-s>', '_b_save' ],
+        [ 'separator' ],
+        [ 'Button', $img{train},        'trains',      '<F5>',        '_b_trains' ],
         #[ 'Button', 'calbell16',        'breakpoints', '<F8>',        '_b_breakpoints' ],
         #[ 'separator' ],
         #[ 'Button', 'playstart16',      'restart',     '<R>',         '_b_restart' ],
@@ -307,11 +348,11 @@ sub _do_tick {
 
             # update current nodes for $train
             my $vec = Games::RailRoad::Vector->new_dir($nextdir);
-            $train->from( $to );
-            $train->to( $to + $vec );
+            $train->set_from( $to );
+            $train->set_to( $to + $vec );
         }
 
-        $train->frac($frac);
+        $train->set_frac($frac);
         $train->draw( $h->{w}{canvas}, $TILELEN );
     }
 }
@@ -394,6 +435,22 @@ sub _on_b_save {
     $file .= '.yaml' unless $file =~ /\.yaml$/;
 
     $_[KERNEL]->yield('_save', $file);
+}
+
+
+#
+# _b_trains();
+#
+# called when the user wants to show/hide trains window.
+#
+sub _on_b_trains {
+    my ($k, $h) = @_[KERNEL, HEAP];
+
+    return $k->post($h->{w}{trains}, 'visibility_toggle')
+        if exists $h->{w}{trains};
+
+    my $id = Games::RailRoad::Window::Trains->spawn(parent=>$poe_main_window);
+    $h->{w}{trains} = $id;
 }
 
 
@@ -613,28 +670,29 @@ sub _resolve_coords {
         default { return; }                   # not precise enough
     }
 
-    return Games::RailRoad::Vector->new($col,$row);
+    return Games::RailRoad::Vector->new({posx=>$col, posy=>$row});
 }
 
 
 1;
 
-__END__
 
+
+=pod
 
 =head1 NAME
 
 Games::RailRoad - a train simulation game
 
+=head1 VERSION
 
+version 1.101330
 
 =head1 DESCRIPTION
 
-C<Games::RailRoad> allows you to draw a railroad, create some trains and
+L<Games::RailRoad> allows you to draw a railroad, create some trains and
 make them move on it. What you did when you were kid, but on your computer
 now.
-
-
 
 =head1 CLASS METHODS
 
@@ -643,21 +701,15 @@ now.
 Create a new game, and return the associated POE session ID.
 No option supported as of now.
 
-
-
 =head1 PUBLIC EVENTS
 
 The POE session accepts the following events:
-
 
 =over 4
 
 =item none yet.
 
-
 =back
-
-
 
 =head1 TODO
 
@@ -680,7 +732,6 @@ on the canvas.
 
 =back
 
-
 The amount of work needed is much more vast and includes (but not
 limited to):
 
@@ -698,27 +749,23 @@ limited to):
 
 =back
 
-
-
-
-=head1 BUGS
-
-Please report any bugs or feature requests to C<< < games-railroad at
-rt.cpan.org> >>, or through the web interface at
-L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=Games-RailRoad>.  I
-will be notified, and then you'll automatically be notified of progress
-on your bug as I make changes.
-
-
-
 =head1 SEE ALSO
 
-L<POE>, L<Tk>.
-
-
-You can also look for information on this module at:
+You can find more information on this module at:
 
 =over 4
+
+=item * Search CPAN
+
+L<http://search.cpan.org/dist/Games-RailRoad>
+
+=item * See open / report bugs
+
+L<http://rt.cpan.org/NoAuth/Bugs.html?Dist=Games-RailRoad>
+
+=item * Git repository
+
+L<http://github.com/jquelin/games-railroad>
 
 =item * AnnoCPAN: Annotated CPAN documentation
 
@@ -728,27 +775,22 @@ L<http://annocpan.org/dist/Games-RailRoad>
 
 L<http://cpanratings.perl.org/d/Games-RailRoad>
 
-=item * RT: CPAN's request tracker
-
-L<http://rt.cpan.org/NoAuth/Bugs.html?Dist=Games-RailRoad>
-
 =back
-
-
 
 =head1 AUTHOR
 
-Jerome Quelin, C<< <jquelin at cpan.org> >>
+  Jerome Quelin
 
+=head1 COPYRIGHT AND LICENSE
 
+This software is copyright (c) 2008 by Jerome Quelin.
 
-=head1 COPYRIGHT & LICENSE
-
-Copyright (c) 2008 Jerome Quelin, all rights reserved.
-
-This program is free software; you can redistribute it and/or modify
-it under the same terms as Perl itself.
-
+This is free software; you can redistribute it and/or modify it under
+the same terms as the Perl 5 programming language system itself.
 
 =cut
+
+
+__END__
+
 
